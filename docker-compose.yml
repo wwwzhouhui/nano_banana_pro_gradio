@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  gemai-nano-banana-pro:
+    build: .
+    container_name: gemai-nano-banana-pro
+    ports:
+      - "8000:8000"
+      - "7860:7860"
+    environment:
+      - GEMAI_API_KEY=${GEMAI_API_KEY}
+      - GEMAI_BASE_URL=${GEMAI_BASE_URL}
+    volumes:
+      - ./generated_images:/app/generated_images
+      - ./logs:/app/logs
+    restart: unless-stopped
