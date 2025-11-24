@@ -11,6 +11,8 @@
 - 🔧 **灵活配置**：支持多种风格、宽高比、创造性参数
 - 📦 **批量生成**：文生图支持一次生成多张图片（1-4张）
 - 🚀 **简化部署**：无需分别启动前后端，app.py 一键启动
+- 📝 **日志系统**：完整的日志记录，支持文件轮转，便于问题定位
+- 🔐 **用户限制**：支持每日使用次数限制（可配置开关，适用于生产环境）
 
 ## 🤖 技术栈
 
@@ -39,11 +41,17 @@ gemai_nano_banana_pro/
 ├── .gitignore                # Git 忽略文件
 ├── start_services.sh         # 启动脚本（调用 app.py）
 ├── README.md                 # 项目文档
+├── USAGE_LIMIT_GUIDE.md      # 用户限制功能说明
+├── LOGGING_GUIDE.md          # 日志系统使用指南
 ├── Dockerfile                # Docker 镜像配置
 ├── docker-compose.yml        # Docker Compose 配置
 ├── .dockerignore             # Docker 忽略文件
 ├── generated_images/         # 生成的图片目录
+├── data/                     # 数据存储目录
+│   └── daily_user_usage.json # 用户每日使用记录
 └── logs/                     # 日志目录
+    ├── gradio_app.log        # Gradio 应用日志
+    └── fastapi_server.log    # FastAPI 服务日志
 ```
 
 **启动流程：**
@@ -73,8 +81,17 @@ pip install -r requirements.txt
 编辑 `.env` 文件，设置您的 Gemai API Key：
 
 ```bash
+# Gemai API 配置
 GEMAI_API_KEY=your_api_key_here
 GEMAI_BASE_URL=https://api.gemai.cc
+
+# 用户限制配置（可选）
+# 是否启用用户限制（true/false）
+# - true: 启用限制（适用于生产环境，需要 ModelScope 平台部署）
+# - false: 关闭限制（适用于本地开发，无需登录）- 默认
+ENABLE_USER_LIMIT=false
+# 每位用户每天可使用的次数（仅在 ENABLE_USER_LIMIT=true 时生效）
+DAILY_USAGE_LIMIT=3
 ```
 
 > **提示**：项目已内置公益站密钥，可以直接使用，但有限额。建议申请自己的 API Key。
@@ -155,6 +172,85 @@ bash start_services.sh
 - 配置 Gemai API Key
 - 设置 API Base URL
 - 查看使用说明
+
+## 📝 日志系统
+
+项目使用 Python logging 模块进行日志记录，便于问题定位和调试。
+
+### 日志文件位置
+
+```
+logs/
+├── gradio_app.log        # Gradio 应用日志
+└── fastapi_server.log    # FastAPI 服务日志
+```
+
+### 日志格式
+
+```
+[2025-11-24 22:11:36] INFO [GradioApp]: 用户限制功能已关闭，直接执行
+[2025-11-24 22:11:36] WARNING [GradioApp]: 扣除使用次数失败
+[2025-11-24 22:11:36] ERROR [GradioApp]: 更新使用记录失败: 测试错误
+```
+
+### 查看日志
+
+```bash
+# 查看 Gradio 应用日志
+cat logs/gradio_app.log
+
+# 查看 FastAPI 服务日志
+cat logs/fastapi_server.log
+
+# 实时跟踪日志
+tail -f logs/gradio_app.log
+
+# 搜索错误日志
+grep "ERROR" logs/gradio_app.log
+```
+
+### 日志特性
+
+- **双重输出**：同时输出到控制台和文件
+- **自动轮转**：单个文件超过 10MB 自动创建新文件
+- **备份保留**：最多保留 5 个备份文件
+- **详细记录**：包含时间戳、日志级别、模块名称
+
+> 详细说明请参考：[LOGGING_GUIDE.md](./LOGGING_GUIDE.md)
+
+## 🔐 用户限制功能
+
+项目支持可选的用户每日使用限制功能，适用于生产环境部署。
+
+### 功能模式
+
+| 模式 | 配置 | 适用场景 |
+|------|------|---------|
+| **本地开发模式**（默认） | `ENABLE_USER_LIMIT=false` | 本地测试、开发调试，无需登录，无限制 |
+| **生产环境模式** | `ENABLE_USER_LIMIT=true` | ModelScope 部署，需要用户认证，每日限额 |
+
+### 配置方法
+
+```bash
+# .env 文件配置
+ENABLE_USER_LIMIT=true    # 启用用户限制
+DAILY_USAGE_LIMIT=3       # 每日限制 3 次
+```
+
+### 数据存储
+
+用户使用记录存储在 `data/daily_user_usage.json`：
+
+```json
+{
+  "2025-11-24": {
+    "user-123": 2,
+    "user-456": 3
+  }
+}
+```
+
+> 详细说明请参考：[USAGE_LIMIT_GUIDE.md](./USAGE_LIMIT_GUIDE.md)
 
 ## 💡 提示词技巧
 
@@ -342,27 +438,57 @@ docker stop gemai-nano-banana-pro
 
 ### 3. 图片生成失败？
 - 检查 API Key 是否正确配置
-- 查看日志文件：`logs/fastapi_server.log`
+- 查看日志文件：`logs/fastapi_server.log` 和 `logs/gradio_app.log`
 - 确认网络连接正常
 
-### 4. 图片质量不理想？
+### 4. 生成按钮点击无响应？
+- **本地开发**：确保 `.env` 文件中 `ENABLE_USER_LIMIT=false`（默认）
+- **生产环境**：如果启用了用户限制，需要 ModelScope 平台请求头
+- 查看控制台或日志文件中的错误信息：`logs/gradio_app.log`
+
+### 5. 图片质量不理想？
 - 优化提示词，使用更详细的描述
 - 使用负向提示词排除不想要的元素
 - 调整创造性参数（temperature）
 - 尝试不同的风格参数
 
-### 5. 生成速度慢？
+### 6. 生成速度慢？
 - 图片生成需要时间，请耐心等待
 - 使用公益站密钥可能有限流
 - 建议申请自己的 API Key
 
-### 6. Gradio 版本兼容性问题？
+### 7. 如何查看详细日志？
+```bash
+# 实时查看日志
+tail -f logs/gradio_app.log
+tail -f logs/fastapi_server.log
+
+# 搜索错误
+grep "ERROR" logs/*.log
+
+# 查看特定时间的日志
+grep "2025-11-24 22:" logs/gradio_app.log
+```
+
+### 8. Gradio 版本兼容性问题？
 - 项目支持 Gradio 5.44.1 及以上版本（包括 6.0.0+）
 - 如遇到 theme 相关错误，请确保使用最新版本的代码
 - 推荐使用 Gradio 6.0.0+ 获得最佳体验
 - 如需降级：`pip install gradio==5.44.1`
 
 ## 📝 更新日志
+
+### v0.0.4 (2025-11-24)
+- 📝 **日志系统**：用 logging 模块替换所有 print 语句，支持文件轮转和分级日志
+- 🔐 **用户限制优化**：添加 `ENABLE_USER_LIMIT` 开关，支持本地开发模式（默认关闭限制）
+- 🔧 **配置完善**：
+  - 应用启动时自动初始化 `data/daily_user_usage.json`
+  - 更新 `.env.example` 配置说明
+- 📖 **文档更新**：
+  - 新增 `LOGGING_GUIDE.md` 日志系统使用指南
+  - 更新 `USAGE_LIMIT_GUIDE.md` 用户限制功能说明
+  - 更新 `README.md` 添加日志和用户限制相关章节
+- 🐛 **Bug 修复**：修复本地运行时因匿名用户被拦截导致生成按钮无响应的问题
 
 ### v0.0.3 (2025-11-24)
 - 🔧 **Gradio 6.0 兼容性**：修复 Gradio 6.0.0 版本 theme 参数兼容性问题

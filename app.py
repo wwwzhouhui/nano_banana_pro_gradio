@@ -19,13 +19,221 @@ import threading
 import time
 import uvicorn
 import sys
+from functools import wraps
+import logging
+from logging.handlers import RotatingFileHandler
 
 # 加载环境变量
 load_dotenv()
 
+# ==================== 日志配置 ====================
+def setup_gradio_logging():
+    """配置 Gradio 应用日志"""
+    os.makedirs('logs', exist_ok=True)
+
+    formatter = logging.Formatter(
+        '[%(asctime)s] %(levelname)s [%(name)s]: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    logger = logging.getLogger('GradioApp')
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    # 文件日志（带轮转）
+    file_handler = RotatingFileHandler(
+        'logs/gradio_app.log',
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # 控制台日志
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    return logger
+
+logger = setup_gradio_logging()
+
+# ==================== 用户限制配置 ====================
+DAILY_USAGE_LIMIT = int(os.getenv('DAILY_USAGE_LIMIT', 3))  # 每天使用限制次数，默认3次
+ENABLE_USER_LIMIT = os.getenv('ENABLE_USER_LIMIT', 'false').lower() == 'true'  # 是否启用用户限制，默认关闭
+# 获取项目根目录
+PROJECT_ROOT = Path(__file__).parent
+# 数据存储目录
+DATA_DIR = PROJECT_ROOT / 'data'
+USAGE_FILE_PATH = DATA_DIR / 'daily_user_usage.json'  # 每日使用记录文件
+
 # 导入 FastAPI 应用
 from fastapi_server import app as fastapi_app, logger as fastapi_logger
 
+
+# ==================== 用户限制功能函数 ====================
+
+def initialize_usage_file():
+    """初始化使用记录文件"""
+    if not USAGE_FILE_PATH.exists():
+        USAGE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(USAGE_FILE_PATH, 'w') as f:
+            json.dump({}, f)
+
+
+def get_today_date():
+    """获取今天的日期字符串"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def get_user_id(request: gr.Request):
+    """从请求头中提取用户ID"""
+    headers = dict(request.headers)
+    user_id = headers.get('x-modelscope-router-id', 'anonymous')
+    return user_id
+
+
+def get_user_id_and_remaining(request: gr.Request):
+    """获取用户ID和剩余次数"""
+    user_id = get_user_id(request)
+    if user_id == 'anonymous':
+        return user_id, 0
+
+    remaining = get_remaining_uses(user_id)
+    return user_id, remaining
+
+
+def check_and_update_usage(user_id: str):
+    """检查并更新用户使用次数（每日限制）"""
+    initialize_usage_file()
+
+    try:
+        today = get_today_date()
+
+        with open(USAGE_FILE_PATH, 'r+') as f:
+            data = json.load(f)
+
+            # 检查今天的记录
+            if today not in data:
+                data[today] = {}
+
+            # 获取当前用户今天的使用次数
+            current_usage = data[today].get(user_id, 0)
+
+            # 检查是否超过限制
+            if current_usage >= DAILY_USAGE_LIMIT:
+                return False
+
+            # 更新使用次数
+            data[today][user_id] = current_usage + 1
+
+            # 写回文件
+            f.seek(0)
+            json.dump(data, f, indent=2)
+            f.truncate()
+            return True
+    except Exception as e:
+        logger.error(f"更新使用记录失败: {e}")
+        return False
+
+
+def get_remaining_uses(user_id: str):
+    """获取用户今天剩余的使用次数"""
+    initialize_usage_file()
+
+    try:
+        today = get_today_date()
+
+        with open(USAGE_FILE_PATH, 'r') as f:
+            data = json.load(f)
+
+            # 获取今天的记录
+            today_data = data.get(today, {})
+            current_usage = today_data.get(user_id, 0)
+
+            return DAILY_USAGE_LIMIT - current_usage
+    except Exception as e:
+        logger.error(f"读取使用记录失败: {e}")
+        return 0
+
+
+def get_user_status(request: gr.Request):
+    """获取用户状态信息"""
+    user_id, remaining = get_user_id_and_remaining(request)
+
+    if user_id == 'anonymous':
+        return "⚠️ 请登录查看您的使用情况 | Please log in to check your usage"
+
+    today = get_today_date()
+    return f"📊 今日剩余次数 | Remaining today: {remaining}/{DAILY_USAGE_LIMIT} (日期: {today})"
+
+
+def daily_limit_wrapper(func):
+    """每日限制装饰器 - 检查用户身份和每日使用限制"""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # 如果未启用用户限制，直接执行原函数
+        if not ENABLE_USER_LIMIT:
+            logger.info("用户限制功能已关闭，直接执行")
+            return func(*args, **kwargs)
+
+        # 从 kwargs 中获取 request 参数
+        request = kwargs.get('request')
+
+        # 如果 kwargs 中没有，尝试从函数签名中查找 request 参数的位置
+        if not request:
+            import inspect
+            sig = inspect.signature(func)
+            param_names = list(sig.parameters.keys())
+
+            # 查找 request 参数的索引
+            try:
+                request_idx = param_names.index('request')
+                if request_idx < len(args):
+                    request = args[request_idx]
+            except (ValueError, IndexError):
+                pass
+
+        if not request:
+            gr.Error("❌ 无法获取用户信息")
+            return None
+
+        # 获取用户ID
+        user_id = get_user_id(request)
+
+        # 检查是否为匿名用户
+        if user_id == 'anonymous':
+            gr.Error("❌ 身份验证失败：请求中缺少 X-Modelscope-Router-Id 请求头\n❌ Authentication failed: Missing X-Modelscope-Router-Id header")
+            return None
+
+        # 检查今日剩余次数
+        remaining = get_remaining_uses(user_id)
+        logger.info(f"用户 {user_id} 今日剩余次数: {remaining}/{DAILY_USAGE_LIMIT}")
+
+        if remaining <= 0:
+            gr.Error(f"❌ 今日使用次数已达上限（{DAILY_USAGE_LIMIT} 次）\n❌ Daily usage limit reached (max {DAILY_USAGE_LIMIT} generations)")
+            return None
+
+        # 执行原函数
+        result = func(*args, **kwargs)
+
+        # 如果生成成功（返回结果不为None或空列表），则扣除次数
+        if result is not None and result != []:
+            if check_and_update_usage(user_id):
+                new_remaining = remaining - 1
+                gr.Info(f"✅ 生成成功！今日剩余次数: {new_remaining}/{DAILY_USAGE_LIMIT}")
+            else:
+                logger.warning("扣除使用次数失败")
+
+        return result
+
+    return wrapper
+
+
+# ==================== FastAPI 服务器启动 ====================
 
 def start_fastapi_server():
     """在后台线程启动 FastAPI 服务器"""
@@ -50,22 +258,22 @@ def start_fastapi_server():
 
 def wait_for_fastapi_ready(max_retries=30, retry_interval=1):
     """等待 FastAPI 服务器启动完成"""
-    print("⏳ 等待 FastAPI 服务器启动...")
+    logger.info("等待 FastAPI 服务器启动...")
 
     for i in range(max_retries):
         try:
             response = requests.get("http://localhost:8000/health", timeout=2)
             if response.status_code == 200:
-                print("✅ FastAPI 服务器已启动")
+                logger.info("FastAPI 服务器已启动")
                 return True
         except:
             pass
 
         time.sleep(retry_interval)
         if (i + 1) % 5 == 0:
-            print(f"   等待中... ({i + 1}/{max_retries})")
+            logger.info(f"等待中... ({i + 1}/{max_retries})")
 
-    print("❌ FastAPI 服务器启动超时")
+    logger.error("FastAPI 服务器启动超时")
     return False
 
 
@@ -162,13 +370,14 @@ class GemaiNanaBananaApp:
             with open(filepath, 'wb') as f:
                 f.write(image_bytes)
 
-            print(f"✅ 图片已保存: {filepath}")
+            logger.info(f"图片已保存: {filepath}")
             return str(filepath)
 
         except Exception as e:
-            print(f"❌ 保存图片失败: {e}")
+            logger.error(f"保存图片失败: {e}")
             return None
 
+    @daily_limit_wrapper
     def text_to_image(
         self,
         prompt,
@@ -177,14 +386,15 @@ class GemaiNanaBananaApp:
         temperature,
         aspect_ratio,
         style,
+        request: gr.Request,
         progress=gr.Progress()
     ):
-        """文生图功能"""
+        """文生图功能（每日限制）"""
         if not prompt.strip():
             gr.Warning("❌ 请输入提示词")
             return []
 
-        print(f"🎨 开始文生图: {prompt}")
+        logger.info(f"开始文生图: {prompt[:50]}...")
 
         # 检查服务器状态
         is_healthy, health_msg = self.check_server_health()
@@ -243,10 +453,11 @@ class GemaiNanaBananaApp:
                 return []
 
         except Exception as e:
-            print(f"❌ 文生图异常: {e}")
+            logger.exception(f"文生图异常: {e}")
             gr.Error(f"❌ 异常: {str(e)}")
             return []
 
+    @daily_limit_wrapper
     def image_to_image(
         self,
         input_image,
@@ -256,9 +467,10 @@ class GemaiNanaBananaApp:
         temperature,
         aspect_ratio,
         style,
+        request: gr.Request,
         progress=gr.Progress()
     ):
-        """图生图功能"""
+        """图生图功能（每日限制）"""
         if input_image is None:
             gr.Warning("❌ 请上传图片")
             return None
@@ -267,7 +479,7 @@ class GemaiNanaBananaApp:
             gr.Warning("❌ 请输入提示词")
             return None
 
-        print(f"🖼️  开始图生图: {prompt}")
+        logger.info(f"开始图生图: {prompt[:50]}...")
 
         # 检查服务器状态
         is_healthy, health_msg = self.check_server_health()
@@ -333,7 +545,7 @@ class GemaiNanaBananaApp:
                 return None
 
         except Exception as e:
-            print(f"❌ 图生图异常: {e}")
+            logger.exception(f"图生图异常: {e}")
             gr.Error(f"❌ 异常: {str(e)}")
             return None
 
@@ -358,6 +570,29 @@ def create_gradio_interface():
     with gr.Blocks(title="Gemai Nano Banana Pro") as demo:
         gr.Markdown("# 🎨 Gemai Nano Banana Pro")
         gr.Markdown("基于 Gemai API 的文生图和图生图工具 | 模型: gemini-3-pro-image-preview")
+
+        # 用户状态显示
+        if ENABLE_USER_LIMIT:
+            gr.Markdown(f"""
+            ### ⚠️ 使用限制提示
+            每位用户每天最多可生成 **{DAILY_USAGE_LIMIT}** 次（文生图 + 图生图合计）。
+            次数在每天 00:00 自动重置。
+            """)
+            user_status = gr.Textbox(
+                label="🛎️ 您的使用状态 | Your Usage Status",
+                interactive=False,
+                value="正在加载..."
+            )
+
+            # 页面加载时更新用户状态
+            demo.load(get_user_status, inputs=None, outputs=user_status)
+        else:
+            gr.Markdown("""
+            ### ℹ️ 本地开发模式
+            用户限制功能已关闭，您可以无限制地生成图片。
+            如需启用用户限制，请在 .env 文件中设置 `ENABLE_USER_LIMIT=true`。
+            """)
+            user_status = None  # 创建一个 None 变量，避免后续引用错误
 
         with gr.Tabs():
             # Tab 1: 文生图
@@ -432,7 +667,7 @@ def create_gradio_interface():
                             height="auto"
                         )
 
-                text2img_btn.click(
+                text2img_click = text2img_btn.click(
                     fn=app.text_to_image,
                     inputs=[
                         text2img_prompt,
@@ -445,6 +680,14 @@ def create_gradio_interface():
                     outputs=[text2img_output],
                     show_progress=True
                 )
+
+                # 只在启用用户限制时更新状态
+                if ENABLE_USER_LIMIT:
+                    text2img_click.then(
+                        fn=get_user_status,
+                        inputs=None,
+                        outputs=user_status
+                    )
 
             # Tab 2: 图生图
             with gr.TabItem("🖼️  图生图"):
@@ -521,7 +764,7 @@ def create_gradio_interface():
                         )
                         copy_to_input_btn = gr.Button("📋 复制到输入区继续修改", variant="secondary")
 
-                img2img_btn.click(
+                img2img_click = img2img_btn.click(
                     fn=app.image_to_image,
                     inputs=[
                         img2img_input,
@@ -535,6 +778,14 @@ def create_gradio_interface():
                     outputs=[img2img_output],
                     show_progress=True
                 )
+
+                # 只在启用用户限制时更新状态
+                if ENABLE_USER_LIMIT:
+                    img2img_click.then(
+                        fn=get_user_status,
+                        inputs=None,
+                        outputs=user_status
+                    )
 
                 # 复制按钮功能
                 def copy_result_to_input(result_image_path):
@@ -656,31 +907,43 @@ def create_gradio_interface():
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🎨 Gemai Nano Banana Pro")
-    print("=" * 60)
-    print("📦 启动模式: 集成模式（FastAPI + Gradio）")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("🎨 Gemai Nano Banana Pro")
+    logger.info("=" * 60)
+    logger.info("📦 启动模式: 集成模式（FastAPI + Gradio）")
+    logger.info("=" * 60)
+
+    # 初始化用户使用记录文件
+    initialize_usage_file()
+    logger.info(f"📁 用户使用记录文件: {USAGE_FILE_PATH}")
+
+    # 显示用户限制状态
+    if ENABLE_USER_LIMIT:
+        logger.info(f"⚠️  用户限制: 已启用（每日限制 {DAILY_USAGE_LIMIT} 次）")
+    else:
+        logger.info(f"ℹ️  用户限制: 已关闭（本地开发模式）")
+    logger.info("=" * 60)
 
     # 1. 在后台线程启动 FastAPI 服务器
     fastapi_thread = threading.Thread(target=start_fastapi_server, daemon=True)
     fastapi_thread.start()
-    print("🔧 FastAPI 服务器正在后台启动...")
+    logger.info("🔧 FastAPI 服务器正在后台启动...")
 
     # 2. 等待 FastAPI 服务器就绪
     if not wait_for_fastapi_ready():
-        print("❌ 无法启动 FastAPI 服务器，程序退出")
+        logger.error("无法启动 FastAPI 服务器，程序退出")
         sys.exit(1)
 
     # 3. 启动 Gradio 应用
-    print("\n" + "=" * 60)
-    print("🌐 启动 Gradio Web 界面...")
-    print("=" * 60)
-    print("📍 访问地址:")
-    print("   - Gradio UI: http://localhost:7860")
-    print("   - FastAPI Docs: http://localhost:8000/docs")
-    print("   - API Health: http://localhost:8000/health")
-    print("=" * 60)
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("🌐 启动 Gradio Web 界面...")
+    logger.info("=" * 60)
+    logger.info("📍 访问地址:")
+    logger.info("   - Gradio UI: http://localhost:7860")
+    logger.info("   - FastAPI Docs: http://localhost:8000/docs")
+    logger.info("   - API Health: http://localhost:8000/health")
+    logger.info("=" * 60)
 
     demo = create_gradio_interface()
     demo.launch(

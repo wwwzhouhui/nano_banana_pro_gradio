@@ -45,6 +45,11 @@ generated_images/*.jpg
 generated_images/*.jpeg
 !generated_images/.gitkeep
 
+# User usage data
+data/*.json
+!data/.gitignore
+!data/README.md
+
 # OS
 .DS_Store
 Thumbs.db
@@ -52,3 +57,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+.claude/settings.local.json
+.ipynb_checkpoints/app-checkpoint.py
+.ipynb_checkpoints/README-checkpoint.md
+data/.ipynb_checkpoints/README-checkpoint.md
