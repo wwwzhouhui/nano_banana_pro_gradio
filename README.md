@@ -497,7 +497,7 @@ A: 项目支持 Gradio 5.44.1 及以上版本（包括 6.0.0+），如遇到 the
 
 欢迎加入技术交流群，分享你的使用心得和反馈建议：
 
-![技术交流群](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/d51aa2bf-8da0-4368-8ba7-de256fafa2ac.jpg)
+![技术交流群](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/image-20261024100147846.png)
 
 ---
 
